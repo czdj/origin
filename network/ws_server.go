@@ -15,6 +15,8 @@ type WSServer struct {
 	MaxConnNum      int
 	PendingWriteNum int
 	MaxMsgLen       uint32
+	ReadDeadline    time.Duration
+	WriteDeadline 	time.Duration
 	HTTPTimeout     time.Duration
 	CertFile        string
 	KeyFile         string
@@ -114,6 +116,15 @@ func (server *WSServer) Start() {
 		server.HTTPTimeout = 10 * time.Second
 		log.SRelease("invalid HTTPTimeout, reset to ", server.HTTPTimeout)
 	}
+	if server.WriteDeadline <= 0 {
+		server.WriteDeadline = Default_WriteDeadline
+		log.SRelease("invalid WriteDeadline, reset to ", server.WriteDeadline.Seconds(),"s")
+	}
+	if server.ReadDeadline <= 0 {
+		server.ReadDeadline = Default_ReadDeadline
+		log.SRelease("invalid ReadDeadline, reset to ", server.ReadDeadline.Seconds(),"s")
+	}
+
 	if server.NewAgent == nil {
 		log.SFatal("NewAgent must not be nil")
 	}

@@ -6,8 +6,8 @@ import (
 	"github.com/duanhf2012/origin/log"
 	"github.com/duanhf2012/origin/network"
 	"github.com/duanhf2012/origin/network/processor"
-	"github.com/duanhf2012/origin/service"
 	"github.com/duanhf2012/origin/node"
+	"github.com/duanhf2012/origin/service"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -89,6 +89,16 @@ func (ws *WSService) OnInit() error{
 		ws.wsServer.MaxMsgLen = uint32(MaxMsgLen.(float64))
 	}
 
+	readDeadline,ok := wsCfg["ReadDeadline"]
+	if ok == true {
+		ws.wsServer.ReadDeadline = time.Second*time.Duration(readDeadline.(float64))
+	}
+
+	writeDeadline,ok := wsCfg["WriteDeadline"]
+	if ok == true {
+		ws.wsServer.WriteDeadline = time.Second*time.Duration(writeDeadline.(float64))
+	}
+
 	ws.mapClient = make( map[uint64] *WSClient, ws.wsServer.MaxConnNum)
 	ws.wsServer.NewAgent = ws.NewWSClient
 	ws.wsServer.Start()
@@ -155,6 +165,7 @@ func (slf *WSClient) GetId() uint64 {
 func (slf *WSClient) Run() {
 	slf.wsService.NotifyEvent(&event.Event{Type:event.Sys_Event_WebSocket,Data:&WSPack{ClientId:slf.id,Type:WPT_Connected,MsgProcessor:slf.wsService.process}})
 	for{
+		slf.wsConn.SetReadDeadline(slf.wsService.wsServer.ReadDeadline)
 		bytes,err := slf.wsConn.ReadMsg()
 		if err != nil {
 			log.Debug("read client id %d is error:%+v",slf.id,err)
