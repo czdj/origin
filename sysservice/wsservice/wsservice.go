@@ -219,3 +219,6 @@ func (ws *WSService) Close(clientid uint64) {
 	return
 }
 
+func (ws *WSService) GetClientNum() int {
+	return len(ws.mapClient)
+}
