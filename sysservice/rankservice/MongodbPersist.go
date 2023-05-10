@@ -6,9 +6,9 @@ import (
 	"github.com/duanhf2012/origin/rpc"
 	"github.com/duanhf2012/origin/service"
 	"github.com/duanhf2012/origin/sysmodule/mongodbmodule"
-	"github.com/duanhf2012/origin/util/coroutine"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo/options"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -71,7 +71,9 @@ func (mp *MongoPersist) OnInit() error {
 	}
 
 	//开启协程
-	coroutine.GoRecover(mp.persistCoroutine,-1)
+	mp.waitGroup.Add(1)
+	go mp.persistCoroutine()
+
 	return nil
 }
 
@@ -260,7 +262,6 @@ func (mp *MongoPersist) JugeTimeoutSave() bool{
 }
 
 func (mp *MongoPersist)  persistCoroutine(){
-	mp.waitGroup.Add(1)
 	defer mp.waitGroup.Done()
 	for atomic.LoadInt32(&mp.stop)==0 || mp.hasPersistData(){
 		//间隔时间sleep
@@ -291,6 +292,15 @@ func (mp *MongoPersist) hasPersistData() bool{
 }
 
 func (mp *MongoPersist) saveToDB(){
+	defer func() {
+		if r := recover(); r != nil {
+			buf := make([]byte, 4096)
+			l := runtime.Stack(buf, false)
+			errString := fmt.Sprint(r)
+			log.SError(" Core dump info[", errString, "]\n", string(buf[:l]))
+		}
+	}()
+
 	//1.copy数据
 	mp.Lock()
 	mapRemoveRankData := mp.mapRemoveRankData

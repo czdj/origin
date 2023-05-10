@@ -291,14 +291,16 @@ func (handler *RpcHandler) HandlerRpcRequest(request *RpcRequest) {
 		request.requestHandle(nil, RpcError(rErr))
 		return
 	}
+
+	requestHanle := request.requestHandle
 	returnValues := v.method.Func.Call(paramList)
 	errInter := returnValues[0].Interface()
 	if errInter != nil {
 		err = errInter.(error)
 	}
 
-	if request.requestHandle != nil && v.hasResponder == false {
-		request.requestHandle(oParam.Interface(), ConvertError(err))
+	if v.hasResponder == false && requestHanle != nil  {
+		requestHanle(oParam.Interface(), ConvertError(err))
 	}
 }
 
@@ -459,11 +461,6 @@ func (handler *RpcHandler) callRpc(nodeId int, serviceMethod string, args interf
 
 	pClient := pClientList[0]
 	pCall := pClient.Go(handler.rpcHandler,false, serviceMethod, args, reply)
-	if pCall.Err != nil {
-		err = pCall.Err
-		ReleaseCall(pCall)
-		return err
-	}
 
 	err = pCall.Done().Err
 	pClient.RemovePending(pCall.Seq)
