@@ -26,6 +26,7 @@ type NodeInfo struct {
 	Private           bool
 	ListenAddr        string
 	MaxRpcParamLen    uint32   //最大Rpc参数长度
+	CompressBytesLen  int   //超过字节进行压缩的长度
 	ServiceList  	  []string //所有的有序服务列表
 	PublicServiceList []string //对外公开的服务列表
 	DiscoveryService  []string //筛选发现的服务，如果不配置，不进行筛选
@@ -73,7 +74,7 @@ func SetServiceDiscovery(serviceDiscovery IServiceDiscovery) {
 }
 
 func (cls *Cluster) Start() {
-	cls.rpcServer.Start(cls.localNodeInfo.ListenAddr, cls.localNodeInfo.MaxRpcParamLen)
+	cls.rpcServer.Start(cls.localNodeInfo.ListenAddr, cls.localNodeInfo.MaxRpcParamLen,cls.localNodeInfo.CompressBytesLen)
 }
 
 func (cls *Cluster) Stop() {
@@ -113,7 +114,7 @@ func (cls *Cluster) DelNode(nodeId int, immediately bool) {
 		//正在连接中不主动断开，只断开没有连接中的
 		if rpc.client.IsConnected() {
 			nodeInfo.status = Discard
-			log.SRelease("Discard node ", nodeInfo.NodeId, " ", nodeInfo.ListenAddr)
+			log.Info("Discard node",log.Int("nodeId",nodeInfo.NodeId),log.String("ListenAddr", nodeInfo.ListenAddr))
 			return
 		}
 
@@ -130,7 +131,7 @@ func (cls *Cluster) DelNode(nodeId int, immediately bool) {
 		rpc.client.Close(false)
 	}
 
-	log.SRelease("remove node ", nodeInfo.NodeId, " ", nodeInfo.ListenAddr)
+	log.Info("remove node ",log.Int("NodeId", nodeInfo.NodeId),log.String("ListenAddr", nodeInfo.ListenAddr))
 }
 
 func (cls *Cluster) serviceDiscoveryDelNode(nodeId int, immediately bool) {
@@ -175,7 +176,7 @@ func (cls *Cluster) serviceDiscoverySetNodeInfo(nodeInfo *NodeInfo) {
 	for _, serviceName := range nodeInfo.PublicServiceList {
 		if _, ok := mapDuplicate[serviceName]; ok == true {
 			//存在重复
-			log.SError("Bad duplicate Service Cfg.")
+			log.Error("Bad duplicate Service Cfg.")
 			continue
 		}
 		mapDuplicate[serviceName] = nil
@@ -185,8 +186,7 @@ func (cls *Cluster) serviceDiscoverySetNodeInfo(nodeInfo *NodeInfo) {
 		cls.mapServiceNode[serviceName][nodeInfo.NodeId] = struct{}{}
 	}
 	cls.mapIdNode[nodeInfo.NodeId] = *nodeInfo
-
-	log.SRelease("Discovery nodeId: ", nodeInfo.NodeId, " services:", nodeInfo.PublicServiceList)
+	log.Info("Discovery nodeId",log.Int("NodeId", nodeInfo.NodeId),log.Any("services:", nodeInfo.PublicServiceList))
 
 	//已经存在连接，则不需要进行设置
 	if _, rpcInfoOK := cls.mapRpc[nodeInfo.NodeId]; rpcInfoOK == true {
@@ -195,7 +195,7 @@ func (cls *Cluster) serviceDiscoverySetNodeInfo(nodeInfo *NodeInfo) {
 
 	rpcInfo := NodeRpcInfo{}
 	rpcInfo.nodeInfo = *nodeInfo
-	rpcInfo.client =rpc.NewRClient(nodeInfo.NodeId, nodeInfo.ListenAddr, nodeInfo.MaxRpcParamLen,cls.triggerRpcEvent)
+	rpcInfo.client =rpc.NewRClient(nodeInfo.NodeId, nodeInfo.ListenAddr, nodeInfo.MaxRpcParamLen,cls.localNodeInfo.CompressBytesLen,cls.triggerRpcEvent)
 	cls.mapRpc[nodeInfo.NodeId] = rpcInfo
 }
 
@@ -367,7 +367,7 @@ func (cls *Cluster) triggerRpcEvent(bConnect bool, clientId uint32, nodeId int) 
 	for serviceName, _ := range cls.mapServiceListenRpcEvent {
 		ser := service.GetService(serviceName)
 		if ser == nil {
-			log.SError("cannot find service name ", serviceName)
+			log.Error("cannot find service name "+serviceName)
 			continue
 		}
 
@@ -385,7 +385,7 @@ func (cls *Cluster) TriggerDiscoveryEvent(bDiscovery bool, nodeId int, serviceNa
 	for sName, _ := range cls.mapServiceListenDiscoveryEvent {
 		ser := service.GetService(sName)
 		if ser == nil {
-			log.SError("cannot find service name ", serviceName)
+			log.Error("cannot find service",log.Any("services",serviceName))
 			continue
 		}
 

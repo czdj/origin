@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"runtime"
 	"time"
+	"sync/atomic"
 )
 
 // ITimer
@@ -29,7 +30,7 @@ type OnAddTimer func(timer ITimer)
 // Timer
 type Timer struct {
 	Id             uint64
-	cancelled      bool          //是否关闭
+	cancelled      int32          //是否关闭
 	C              chan ITimer   //定时器管道
 	interval       time.Duration // 时间间隔（用于循环定时器）
 	fireTime       time.Time     // 触发时间
@@ -131,7 +132,7 @@ func (t *Timer) Do() {
 			buf := make([]byte, 4096)
 			l := runtime.Stack(buf, false)
 			errString := fmt.Sprint(r)
-			log.SError("core dump info[", errString, "]\n", string(buf[:l]))
+			log.Dump(string(buf[:l]),log.String("error",errString))
 		}
 	}()
 
@@ -171,12 +172,12 @@ func (t *Timer) GetInterval() time.Duration {
 }
 
 func (t *Timer) Cancel() {
-	t.cancelled = true
+	atomic.StoreInt32(&t.cancelled,1)
 }
 
 // 判断定时器是否已经取消
 func (t *Timer) IsActive() bool {
-	return !t.cancelled
+	return atomic.LoadInt32(&t.cancelled) == 0
 }
 
 func (t *Timer) GetName() string {
@@ -217,7 +218,7 @@ func (c *Cron) Do() {
 			buf := make([]byte, 4096)
 			l := runtime.Stack(buf, false)
 			errString := fmt.Sprint(r)
-			log.SError("core dump info[", errString, "]\n", string(buf[:l]))
+			log.Dump(string(buf[:l]),log.String("error",errString))
 		}
 	}()
 
@@ -273,7 +274,7 @@ func (c *Ticker) Do() {
 			buf := make([]byte, 4096)
 			l := runtime.Stack(buf, false)
 			errString := fmt.Sprint(r)
-			log.SError("core dump info[", errString, "]\n", string(buf[:l]))
+			log.Dump(string(buf[:l]),log.String("error",errString))
 		}
 	}()
 

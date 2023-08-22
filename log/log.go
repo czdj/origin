@@ -1,17 +1,16 @@
 package log
 
 import (
-	"errors"
+	"context"
 	"fmt"
+	"github.com/duanhf2012/origin/util/bytespool"
 	jsoniter "github.com/json-iterator/go"
 	"io"
-	"log"
-	syslog "log"
+	"log/slog"
 	"os"
 	"path"
+	"path/filepath"
 	"runtime"
-	"runtime/debug"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -19,552 +18,283 @@ import (
 
 var json = jsoniter.ConfigCompatibleWithStandardLibrary
 var OpenConsole bool
+var LogSize int64
+var LogChannelCap int
+var LogPath string
+var LogLevel slog.Level = LevelTrace
+var gLogger, _ = NewTextLogger(LevelDebug, "", "",true,LogChannelCap)
+var memPool = bytespool.NewMemAreaPool()
 
 // levels
 const (
-	debugLevel   = 0
-	releaseLevel = 1
-	warningLevel = 2
-	errorLevel   = 3
-	stackLevel   = 4
-	fatalLevel   = 5
-)
-
-const (
-	printDebugLevel   = "[debug  ] "
-	printReleaseLevel = "[release] "
-	printWarningLevel = "[warning] "
-	printErrorLevel   = "[error  ] "
-	printStackLevel   = "[stack  ] "
-	printFatalLevel   = "[fatal  ] "
+	LevelTrace          	= slog.Level(-8)
+	LevelDebug        	= slog.LevelDebug
+	LevelInfo       	= slog.LevelInfo
+	LevelWarning    	= slog.LevelWarn
+	LevelError        	= slog.LevelError
+	LevelStack   			= slog.Level(12)
+	LevelDump               = slog.Level(16)
+	LevelFatal 				= slog.Level(20)
 )
 
 type Logger struct {
-	filePath   string
-	filepre 	string
-	
-	//logTime    time.Time
-	fileDay        int
-	level      int
-	flag       int
-	buf            []Buffer
+	Slogger *slog.Logger
 
-	outFile    io.Writer  // destination for output
-	outConsole io.Writer  //os.Stdout
+	ioWriter IoWriter
 
-	mu     sync.Mutex // ensures atomic writes; protects the following fields
-	buffIndex uint32
-	buffNum uint32
+	sBuff Buffer
 }
 
-func (logger *Logger) GenDayFile(now *time.Time) error {
-	if logger.fileDay == now.Day() {
-		return nil
+type IoWriter struct {
+	outFile    io.Writer  // destination for output
+	outConsole io.Writer  //os.Stdout
+	writeBytes  int64
+	logChannel chan []byte
+	wg             sync.WaitGroup
+	closeSig chan struct{}
+
+	lockWrite sync.Mutex
+
+	filePath    string
+	fileprefix 	string
+	fileDay     int
+	fileCreateTime int64 //second
+}
+
+func (iw *IoWriter) Close() error {
+	iw.lockWrite.Lock()
+	defer iw.lockWrite.Unlock()
+
+	iw.close()
+
+	return nil
+}
+
+func (iw *IoWriter) close() error {
+	if iw.closeSig != nil {
+		close(iw.closeSig)
+		iw.closeSig = nil
 	}
+	iw.wg.Wait()
 
-	filename := fmt.Sprintf("%d%02d%02d_%02d_%02d_%02d.log",
-		now.Year(),
-		now.Month(),
-		now.Day(),
-		now.Hour(),
-		now.Minute(),
-		now.Second())
-
-	if logger.filePath != "" {
-		var err error
-		logger.outFile,err = os.Create(path.Join(logger.filePath, logger.filepre+filename))
-		if err != nil {
-			return err
-		}
-		logger.fileDay = now.Day()
-		if OpenConsole == true {
-			logger.outConsole = os.Stdout
-		}
-	}else{
-		logger.outConsole = os.Stdout
+	if iw.outFile!= nil {
+		err := iw.outFile.(io.Closer).Close()
+		iw.outFile = nil
+		return err
 	}
 
 	return nil
 }
 
-func New(strLevel string, pathName string, filePre string, flag int,buffNum uint32) (*Logger, error) {
-	// level
-	var level int
-	switch strings.ToLower(strLevel) {
-	case "debug":
-		level = debugLevel
-	case "release":
-		level = releaseLevel
-	case "warning":
-		level = warningLevel
-	case "error":
-		level = errorLevel
-	case "stack":
-		level = stackLevel
-	case "fatal":
-		level = fatalLevel
-	default:
-		return nil, errors.New("unknown level: " + strLevel)
+func (iw *IoWriter) writeFile(p []byte) (n int, err error){
+	//swich log file
+	iw.swichFile()
+
+	if iw.outFile != nil {
+		n,err = iw.outFile.Write(p)
+		if n > 0 {
+			atomic.AddInt64(&iw.writeBytes,int64(n))
+		}
 	}
 
-	// new111
-	logger := new(Logger)
-	logger.level = level
-	logger.filePath = pathName
-	logger.filepre = filePre
-	logger.flag = flag
-	logger.buf = make([]Buffer,buffNum)
-	logger.buffNum = buffNum
+	return 0,nil
+}
 
-	for i:=uint32(0);i<buffNum;i++{
-		logger.buf[i].Init()
+func (iw *IoWriter) Write(p []byte) (n int, err error){
+	iw.lockWrite.Lock()
+	defer iw.lockWrite.Unlock()
+
+	if iw.logChannel == nil {
+		return iw.writeIo(p)
 	}
 
+	copyBuff := memPool.MakeBytes(len(p))
+	if copyBuff == nil {
+		return 0,fmt.Errorf("MakeByteSlice failed")
+	}
+	copy(copyBuff,p)
+
+	iw.logChannel <- copyBuff
+
+	return
+}
+
+func (iw *IoWriter) writeIo(p []byte)  (n int, err error){
+	n,err = iw.writeFile(p)
+
+	if iw.outConsole != nil {
+		n,err = iw.outConsole.Write(p)
+	}
+
+	return
+}
+
+func (iw *IoWriter) setLogChannel(logChannelNum int) (err error){
+	iw.lockWrite.Lock()
+	defer iw.lockWrite.Unlock()
+	iw.close()
+
+	if logChannelNum == 0 {
+		return nil
+	}
+
+	//copy iw.logChannel
+	var logInfo []byte
+	logChannel := make(chan []byte,logChannelNum)
+	for i := 0; i < logChannelNum&&i<len(iw.logChannel); i++{
+		logInfo = <- iw.logChannel
+		logChannel <- logInfo
+	}
+	iw.logChannel = logChannel
+
+	iw.closeSig = make(chan struct{})
+	iw.wg.Add(1)
+	go iw.run()
+
+	return nil
+}
+
+func (iw *IoWriter) run(){
+	defer iw.wg.Done()
+
+Loop:
+	for{
+		select {
+		case <- iw.closeSig:
+			break Loop
+		case logs := <-iw.logChannel:
+			iw.writeIo(logs)
+			memPool.ReleaseBytes(logs)
+		}
+	}
+
+	for len(iw.logChannel) > 0 {
+			logs := <-iw.logChannel
+			iw.writeIo(logs)
+			memPool.ReleaseBytes(logs)
+	}
+}
+
+func (iw *IoWriter) isFull() bool {
+	if LogSize == 0 {
+		return false
+	}
+
+	return atomic.LoadInt64(&iw.writeBytes) >= LogSize
+}
+
+func (logger *Logger) setLogChannel(logChannel int) (err error){
+	return logger.ioWriter.setLogChannel(logChannel)
+}
+
+func (iw *IoWriter) swichFile() error{
 	now := time.Now()
-	err := logger.GenDayFile(&now)
+	if iw.fileCreateTime == now.Unix() {
+		return nil
+	}
+
+	if iw.fileDay == now.Day() && iw.isFull() == false {
+		return nil
+	}
+
+	if iw.filePath != "" {
+		var err error
+		fileName := fmt.Sprintf("%s%d%02d%02d_%02d_%02d_%02d.log",
+			iw.fileprefix,
+			now.Year(),
+			now.Month(),
+			now.Day(),
+			now.Hour(),
+			now.Minute(),
+			now.Second())
+
+		filePath := path.Join(iw.filePath, fileName)
+
+		iw.outFile,err = os.Create(filePath)
+		if err != nil {
+			return err
+		}
+		iw.fileDay = now.Day()
+		iw.fileCreateTime = now.Unix()
+		atomic.StoreInt64(&iw.writeBytes,0)
+		if OpenConsole == true {
+			iw.outConsole = os.Stdout
+		}
+	}else{
+		iw.outConsole = os.Stdout
+	}
+
+	return nil
+}
+
+func NewTextLogger(level slog.Level,pathName string,filePrefix string,addSource bool,logChannelCap int) (*Logger,error){
+	var logger Logger
+	logger.ioWriter.filePath = pathName
+	logger.ioWriter.fileprefix = filePrefix
+
+	logger.Slogger = slog.New(NewOriginTextHandler(level,&logger.ioWriter,addSource,defaultReplaceAttr))
+	logger.setLogChannel(logChannelCap)
+	err := logger.ioWriter.swichFile()
 	if err != nil {
 		return nil,err
 	}
 
-	return logger, nil
+	return &logger,nil
 }
 
+func NewJsonLogger(level slog.Level,pathName string,filePrefix string,addSource bool,logChannelCap int) (*Logger,error){
+	var logger Logger
+	logger.ioWriter.filePath = pathName
+	logger.ioWriter.fileprefix = filePrefix
 
-func (logger *Logger) nextBuff() *Buffer{
-	return &logger.buf[atomic.AddUint32(&logger.buffIndex,1)%logger.buffNum]
+	logger.Slogger = slog.New(NewOriginJsonHandler(level,&logger.ioWriter,true,defaultReplaceAttr))
+	logger.setLogChannel(logChannelCap)
+	err := logger.ioWriter.swichFile()
+	if err != nil {
+		return nil,err
+	}
+
+	return &logger,nil
 }
 
 // It's dangerous to call the method on logging
 func (logger *Logger) Close() {
-	if logger.outFile != nil {
-		logger.outFile.(io.Closer).Close()
-		logger.outFile = nil
-	}
+	logger.ioWriter.Close()
 }
 
-func (logger *Logger) doPrintf(level int, printLevel string, format string, a ...interface{}) {
-	if level < logger.level {
-		return
-	}
-	now := time.Now()
-
-
-	buf := logger.nextBuff()
-	buf.Locker()
-
-	buf.Reset()
-	logger.formatHeader(buf,3,&now)
-	buf.AppendString(printLevel)
-	buf.AppendString(fmt.Sprintf(format, a...))
-	buf.AppendByte('\n')
-
-	logger.mu.Lock()
-	logger.GenDayFile(&now)
-
-	if logger.outFile!= nil {
-		logger.outFile.Write(buf.Bytes())
-	}
-	if logger.outConsole!= nil {
-		logger.outConsole.Write(buf.Bytes())
-	}
-	logger.mu.Unlock()
-	buf.UnLocker()
-	if level == fatalLevel {
-		os.Exit(1)
-	}
+func (logger *Logger) Trace(msg string, args ...any) {
+	logger.Slogger.Log(context.Background(),LevelTrace,msg,args...)
 }
 
+func (logger *Logger) Debug(msg string, args ...any) {
 
-func (logger *Logger) doSPrintf(level int, printLevel string, a []interface{}) {
-	if level < logger.level {
-		return
-	}
-	now := time.Now()
-	buf := logger.nextBuff()
-	buf.Locker()
-	buf.Reset()
-	logger.formatHeader(buf,3,&now)
-	buf.AppendString(printLevel)
-	for _,s := range a {
-		switch s.(type) {
-		//case error:
-		//	logger.buf.AppendString(s.(error).Error())
-		case []string:
-			strSlice := s.([]string)
-			buf.AppendByte('[')
-			for _,str := range strSlice {
-				buf.AppendString(str)
-				buf.AppendByte(',')
-			}
-
-			lastIdx := buf.Len()-1
-			if buf.Bytes()[lastIdx] == ',' {
-				buf.Bytes()[lastIdx] = ']'
-			}else{
-				buf.AppendByte(']')
-			}
-
-		case int:
-			buf.AppendInt(int64(s.(int)))
-		case []int:
-			intSlice := s.([]int)
-			buf.AppendByte('[')
-			for _,v := range intSlice {
-				buf.AppendInt(int64(v))
-				buf.AppendByte(',')
-			}
-
-			lastIdx := buf.Len()-1
-			if buf.Bytes()[lastIdx] == ',' {
-				buf.Bytes()[lastIdx] = ']'
-			}else{
-				buf.AppendByte(']')
-			}
-		case int8:
-			buf.AppendInt(int64(s.(int8)))
-		case []int8:
-			intSlice := s.([]int8)
-			buf.AppendByte('[')
-			for _,v := range intSlice {
-				buf.AppendInt(int64(v))
-				buf.AppendByte(',')
-			}
-
-			lastIdx := buf.Len()-1
-			if buf.Bytes()[lastIdx] == ',' {
-				buf.Bytes()[lastIdx] = ']'
-			}else{
-				buf.AppendByte(']')
-			}
-		case int16:
-			buf.AppendInt(int64(s.(int16)))
-		case []int16:
-			intSlice := s.([]int16)
-			buf.AppendByte('[')
-			for _,v := range intSlice {
-				buf.AppendInt(int64(v))
-				buf.AppendByte(',')
-			}
-
-			lastIdx := buf.Len()-1
-			if buf.Bytes()[lastIdx] == ',' {
-				buf.Bytes()[lastIdx] = ']'
-			}else{
-				buf.AppendByte(']')
-			}
-		case int32:
-			buf.AppendInt(int64(s.(int32)))
-		case []int32:
-			intSlice := s.([]int32)
-			buf.AppendByte('[')
-			for _,v := range intSlice {
-				buf.AppendInt(int64(v))
-				buf.AppendByte(',')
-			}
-
-			lastIdx := buf.Len()-1
-			if buf.Bytes()[lastIdx] == ',' {
-				buf.Bytes()[lastIdx] = ']'
-			}else{
-				buf.AppendByte(']')
-			}
-		case int64:
-			buf.AppendInt(s.(int64))
-		case []int64:
-			intSlice := s.([]int64)
-			buf.AppendByte('[')
-			for _,v := range intSlice {
-				buf.AppendInt(v)
-				buf.AppendByte(',')
-			}
-
-			lastIdx := buf.Len()-1
-			if buf.Bytes()[lastIdx] == ',' {
-				buf.Bytes()[lastIdx] = ']'
-			}else{
-				buf.AppendByte(']')
-			}
-		case uint:
-			buf.AppendUint(uint64(s.(uint)))
-
-		case []uint:
-			intSlice := s.([]uint)
-			buf.AppendByte('[')
-			for _,v := range intSlice {
-				buf.AppendUint(uint64(v))
-				buf.AppendByte(',')
-			}
-
-			lastIdx := buf.Len()-1
-			if buf.Bytes()[lastIdx] == ',' {
-				buf.Bytes()[lastIdx] = ']'
-			}else{
-				buf.AppendByte(']')
-			}
-
-		case uint8:
-			buf.AppendUint(uint64(s.(uint8)))
-		case []uint8:
-			intSlice := s.([]uint8)
-			buf.AppendByte('[')
-			for _,v := range intSlice {
-				buf.AppendUint(uint64(v))
-				buf.AppendByte(',')
-			}
-
-			lastIdx := buf.Len()-1
-			if buf.Bytes()[lastIdx] == ',' {
-				buf.Bytes()[lastIdx] = ']'
-			}else{
-				buf.AppendByte(']')
-			}
-
-		case uint16:
-			buf.AppendUint(uint64(s.(uint16)))
-		case []uint16:
-			intSlice := s.([]uint16)
-			buf.AppendByte('[')
-			for _,v := range intSlice {
-				buf.AppendUint(uint64(v))
-				buf.AppendByte(',')
-			}
-
-			lastIdx := buf.Len()-1
-			if buf.Bytes()[lastIdx] == ',' {
-				buf.Bytes()[lastIdx] = ']'
-			}else{
-				buf.AppendByte(']')
-			}
-		case uint32:
-			buf.AppendUint(uint64(s.(uint32)))
-		case []uint32:
-			intSlice := s.([]uint32)
-			buf.AppendByte('[')
-			for _,v := range intSlice {
-				buf.AppendUint(uint64(v))
-				buf.AppendByte(',')
-			}
-
-			lastIdx := buf.Len()-1
-			if buf.Bytes()[lastIdx] == ',' {
-				buf.Bytes()[lastIdx] = ']'
-			}else{
-				buf.AppendByte(']')
-			}
-		case uint64:
-			buf.AppendUint(s.(uint64))
-		case []uint64:
-			intSlice := s.([]uint64)
-			buf.AppendByte('[')
-			for _,v := range intSlice {
-				buf.AppendUint(v)
-				buf.AppendByte(',')
-			}
-			lastIdx := buf.Len()-1
-			if buf.Bytes()[lastIdx] == ',' {
-				buf.Bytes()[lastIdx] = ']'
-			}else{
-				buf.AppendByte(']')
-			}
-		case float32:
-			buf.AppendFloat(float64(s.(float32)),32)
-		case []float32:
-			intSlice := s.([]float32)
-			buf.AppendByte('[')
-			for _,v := range intSlice {
-				buf.AppendFloat(float64(v),32)
-				buf.AppendByte(',')
-			}
-			lastIdx := buf.Len()-1
-			if buf.Bytes()[lastIdx] == ',' {
-				buf.Bytes()[lastIdx] = ']'
-			}else{
-				buf.AppendByte(']')
-			}
-		case float64:
-			buf.AppendFloat(s.(float64),64)
-		case []float64:
-			intSlice := s.([]float64)
-			buf.AppendByte('[')
-			for _,v := range intSlice {
-				buf.AppendFloat(v,64)
-				buf.AppendByte(',')
-			}
-			lastIdx := buf.Len()-1
-			if buf.Bytes()[lastIdx] == ',' {
-				buf.Bytes()[lastIdx] = ']'
-			}else{
-				buf.AppendByte(']')
-			}
-		case bool:
-			buf.AppendBool(s.(bool))
-		case []bool:
-			intSlice := s.([]bool)
-			buf.AppendByte('[')
-			for _,v := range intSlice {
-				buf.AppendBool(v)
-				buf.AppendByte(',')
-			}
-			lastIdx := buf.Len()-1
-			if buf.Bytes()[lastIdx] == ',' {
-				buf.Bytes()[lastIdx] = ']'
-			}else{
-				buf.AppendByte(']')
-			}
-		case string:
-			buf.AppendString(s.(string))
-		case *int:
-			val := s.(*int)
-			if val != nil {
-				buf.AppendInt(int64(*val))
-			}else{
-				buf.AppendString("nil<*int>")
-			}
-		case *int8:
-			val := s.(*int8)
-			if val != nil {
-				buf.AppendInt(int64(*val))
-			}else{
-				buf.AppendString("nil<*int8>")
-			}
-		case *int16:
-			val := s.(*int16)
-			if val != nil {
-				buf.AppendInt(int64(*val))
-			}else{
-				buf.AppendString("nil<*int16>")
-			}
-		case *int32:
-			val := s.(*int32)
-			if val != nil {
-				buf.AppendInt(int64(*val))
-			}else{
-				buf.AppendString("nil<*int32>")
-			}
-		case *int64:
-			val := s.(*int64)
-			if val != nil {
-				buf.AppendInt(int64(*val))
-			}else{
-				buf.AppendString("nil<*int64>")
-			}
-		case *uint:
-			val := s.(*uint)
-			if val != nil {
-				buf.AppendUint(uint64(*val))
-			}else{
-				buf.AppendString("nil<*uint>")
-			}
-		case *uint8:
-			val := s.(*uint8)
-			if val != nil {
-				buf.AppendUint(uint64(*val))
-			}else{
-				buf.AppendString("nil<*uint8>")
-			}
-		case *uint16:
-			val := s.(*uint16)
-			if val != nil {
-				buf.AppendUint(uint64(*val))
-			}else{
-				buf.AppendString("nil<*uint16>")
-			}
-		case *uint32:
-			val := s.(*uint32)
-			if val != nil {
-				buf.AppendUint(uint64(*val))
-			}else{
-				buf.AppendString("nil<*uint32>")
-			}
-		case *uint64:
-			val := s.(*uint64)
-			if val != nil {
-				buf.AppendUint(uint64(*val))
-			}else{
-				buf.AppendString("nil<*uint64>")
-			}
-		case *float32:
-			val := s.(*float32)
-			if val != nil {
-				buf.AppendFloat(float64(*val),32)
-			}else{
-				buf.AppendString("nil<*float32>")
-			}
-		case *float64:
-			val := s.(*float32)
-			if val != nil {
-				buf.AppendFloat(float64(*val),64)
-			}else{
-				buf.AppendString("nil<*float64>")
-			}
-		case *bool:
-			val := s.(*bool)
-			if val != nil {
-				buf.AppendBool(*val)
-			}else{
-				buf.AppendString("nil<*bool>")
-			}
-		case *string:
-			val := s.(*string)
-			if val != nil {
-				buf.AppendString(*val)
-			}else{
-				buf.AppendString("nil<*string>")
-			}
-		//case []byte:
-		//	logger.buf.AppendBytes(s.([]byte))
-		default:
-			//b,err := json.MarshalToString(s)
-			//if err != nil {
-			buf.AppendString("<unknown type>")
-			//}else{
-				//logger.buf.AppendBytes(b)
-			//}
-		}
-	}
-	buf.AppendByte('\n')
-
-	logger.mu.Lock()
-	logger.GenDayFile(&now)
-	if logger.outFile!= nil {
-		logger.outFile.Write(buf.Bytes())
-	}
-	if logger.outConsole!= nil {
-		logger.outConsole.Write(buf.Bytes())
-	}
-	logger.mu.Unlock()
-	buf.UnLocker()
-
-	if level == fatalLevel {
-		os.Exit(1)
-	}
+	logger.Slogger.Log(context.Background(),LevelDebug,msg,args...)
 }
 
-func (logger *Logger) Debug(format string, a ...interface{}) {
-	logger.doPrintf(debugLevel, printDebugLevel, format, a...)
+func (logger *Logger) Info(msg string, args ...any) {
+	logger.Slogger.Log(context.Background(),LevelInfo,msg,args...)
 }
 
-func (logger *Logger) Release(format string, a ...interface{}) {
-	logger.doPrintf(releaseLevel, printReleaseLevel, format, a...)
+func (logger *Logger) Warning(msg string, args ...any) {
+	logger.Slogger.Log(context.Background(),LevelWarning,msg,args...)
 }
 
-func (logger *Logger) Warning(format string, a ...interface{}) {
-	logger.doPrintf(warningLevel, printWarningLevel, format, a...)
+func (logger *Logger) Error(msg string, args ...any) {
+	logger.Slogger.Log(context.Background(),LevelError,msg,args...)
 }
 
-func (logger *Logger) Error(format string, a ...interface{}) {
-	logger.doPrintf(errorLevel, printErrorLevel, format, a...)
+func (logger *Logger) Stack(msg string, args ...any) {
+	logger.Slogger.Log(context.Background(),LevelStack,msg,args...)
 }
 
-func (logger *Logger) Stack(format string, a ...interface{}) {
-	logger.doPrintf(stackLevel, printStackLevel, format, a...)
+func (logger *Logger) Dump(msg string, args ...any) {
+	logger.Slogger.Log(context.Background(),LevelDump,msg,args...)
 }
 
-func (logger *Logger) Fatal(format string, a ...interface{}) {
-	logger.doPrintf(fatalLevel, printFatalLevel, format, a...)
+func (logger *Logger) Fatal(msg string, args ...any) {
+	logger.Slogger.Log(context.Background(),LevelFatal,msg,args...)
+	os.Exit(1)
 }
-
-var gLogger, _ = New("debug", "", "", log.LstdFlags|log.Lshortfile,1)
 
 // It's dangerous to call the method on logging
 func Export(logger *Logger) {
@@ -573,122 +303,211 @@ func Export(logger *Logger) {
 	}
 }
 
-func Debug(format string, a ...interface{}) {
-	gLogger.doPrintf(debugLevel, printDebugLevel, format, a...)
+func Trace(msg string, args ...any){
+	gLogger.Trace(msg, args...)
 }
 
-func Release(format string, a ...interface{}) {
-	gLogger.doPrintf(releaseLevel, printReleaseLevel, format, a...)
+func Debug(msg string, args ...any){
+	gLogger.Debug(msg,args...)
 }
 
-func Warning(format string, a ...interface{}) {
-	gLogger.doPrintf(warningLevel, printWarningLevel, format, a...)
+func Info(msg string, args ...any){
+	gLogger.Info(msg,args...)
 }
 
-func Error(format string, a ...interface{}) {
-	gLogger.doPrintf(errorLevel, printErrorLevel, format, a...)
+func Warning(msg string, args ...any){
+	gLogger.Warning(msg,args...)
 }
 
-func Stack(format string, a ...interface{}) {
-	s := string(debug.Stack())
-	gLogger.doPrintf(stackLevel, printStackLevel, s+"\n"+format, a...)
+func Error(msg string, args ...any){
+	gLogger.Error(msg,args...)
 }
 
-func Fatal(format string, a ...interface{}) {
-	gLogger.doPrintf(fatalLevel, printFatalLevel, format, a...)
+func Stack(msg string, args ...any){
+	gLogger.Stack(msg,args...)
+}
+
+func Dump(dump string, args ...any){
+	gLogger.Dump(dump,args...)
+}
+
+func Fatal(msg string, args ...any){
+	gLogger.Fatal(msg,args...)
 }
 
 func Close() {
 	gLogger.Close()
 }
 
-func SDebug(a ...interface{}) {
-	gLogger.doSPrintf(debugLevel, printDebugLevel, a)
+func ErrorAttr(key string,value error) slog.Attr{
+	return slog.Attr{key, slog.StringValue(value.Error())}
 }
 
-func SRelease(a ...interface{}) {
-	gLogger.doSPrintf(releaseLevel, printReleaseLevel, a)
+func String(key, value string) slog.Attr {
+	return slog.Attr{key, slog.StringValue(value)}
+}
+
+func Int(key string, value int) slog.Attr {
+	return slog.Attr{key, slog.Int64Value(int64(value))}
+}
+
+func Int64(key string, value int64) slog.Attr {
+	return slog.Attr{key, slog.Int64Value(value)}
+}
+
+func Int32(key string, value int32) slog.Attr {
+	return slog.Attr{key, slog.Int64Value(int64(value))}
+}
+
+func Int16(key string, value int16) slog.Attr {
+	return slog.Attr{key, slog.Int64Value(int64(value))}
+}
+
+func Int8(key string, value int8) slog.Attr {
+	return slog.Attr{key, slog.Int64Value(int64(value))}
+}
+
+func Uint(key string, value uint) slog.Attr {
+	return slog.Attr{key, slog.Uint64Value(uint64(value))}
+}
+
+func Uint64(key string, v uint64) slog.Attr {
+	return slog.Attr{key, slog.Uint64Value(v)}
+}
+
+func Uint32(key string, value uint32) slog.Attr {
+	return slog.Attr{key, slog.Uint64Value(uint64(value))}
+}
+
+func Uint16(key string, value uint16) slog.Attr {
+	return slog.Attr{key, slog.Uint64Value(uint64(value))}
+}
+
+func Uint8(key string, value uint8) slog.Attr {
+	return slog.Attr{key, slog.Uint64Value(uint64(value))}
+}
+
+func Float64(key string, v float64) slog.Attr {
+	return slog.Attr{key, slog.Float64Value(v)}
+}
+
+func Bool(key string, v bool) slog.Attr {
+	return slog.Attr{key, slog.BoolValue(v)}
+}
+
+func Time(key string, v time.Time) slog.Attr {
+	return slog.Attr{key, slog.TimeValue(v)}
+}
+
+func Duration(key string, v time.Duration) slog.Attr {
+	return slog.Attr{key, slog.DurationValue(v)}
+}
+
+func Any(key string, value any) slog.Attr {
+	return slog.Attr{key, slog.AnyValue(value)}
+}
+
+func Group(key string, args ...any) slog.Attr {
+	return slog.Group(key, args...)
+}
+
+func (logger *Logger) doSPrintf(level slog.Level,a []interface{}) {
+	if logger.Slogger.Enabled(context.Background(),level) == false{
+		return
+	}
+
+	logger.Slogger.Handler().(IOriginHandler).Lock()
+	defer logger.Slogger.Handler().(IOriginHandler).UnLock()
+
+	logger.sBuff.Reset()
+
+	logger.formatHeader(&logger.sBuff,level,3)
+
+	for _,s := range a {
+		logger.sBuff.AppendString(slog.AnyValue(s).String())
+	}
+	logger.sBuff.AppendString("\"\n")
+	logger.ioWriter.Write([]byte(logger.sBuff.Bytes()))
+}
+
+ func (logger *Logger) STrace(a ...interface{}) {
+	 logger.doSPrintf(LevelTrace,a)
+}
+
+func (logger *Logger)  SDebug(a ...interface{}) {
+	logger.doSPrintf(LevelDebug,a)
+}
+
+func (logger *Logger)  SInfo(a ...interface{}) {
+	logger.doSPrintf(LevelInfo,a)
+}
+
+func (logger *Logger)  SWarning(a ...interface{}) {
+	logger.doSPrintf(LevelWarning,a)
+}
+
+func (logger *Logger)  SError(a ...interface{}) {
+	logger.doSPrintf(LevelError,a)
+}
+
+func STrace(a ...interface{}) {
+	gLogger.doSPrintf(LevelTrace,a)
+}
+
+func SDebug(a ...interface{}) {
+	gLogger.doSPrintf(LevelDebug,a)
+}
+
+func SInfo(a ...interface{}) {
+	gLogger.doSPrintf(LevelInfo,a)
 }
 
 func SWarning(a ...interface{}) {
-	gLogger.doSPrintf(warningLevel, printWarningLevel,  a)
+	gLogger.doSPrintf(LevelWarning,a)
 }
 
 func SError(a ...interface{}) {
-	gLogger.doSPrintf(errorLevel, printErrorLevel, a)
+	gLogger.doSPrintf(LevelError,a)
 }
 
-func SStack(a ...interface{}) {
-	gLogger.doSPrintf(stackLevel, printStackLevel, a)
-	gLogger.doSPrintf(stackLevel, printStackLevel, []interface{}{string(debug.Stack())})
-}
-
-func SFatal(a ...interface{}) {
-	gLogger.doSPrintf(fatalLevel, printFatalLevel,  a)
-}
-
-const timeFlag = syslog.Ldate|syslog.Ltime|syslog.Lmicroseconds
-func (logger *Logger) formatHeader(buf *Buffer,calldepth int,t *time.Time) {
+func (logger *Logger) formatHeader(buf *Buffer,level slog.Level,calldepth int) {
+	t := time.Now()
 	var file string
 	var line int
-	if logger.flag&(syslog.Lshortfile|syslog.Llongfile) != 0 {
-		// Release lock while getting caller info - it's expensive.
-		var ok bool
-		_, file, line, ok = runtime.Caller(calldepth)
-		if !ok {
-			file = "???"
-			line = 0
-		}
-	}
 
-	if logger.flag&syslog.Lmsgprefix != 0 {
-		buf.AppendString(logger.filepre)
+	// Release lock while getting caller info - it's expensive.
+	var ok bool
+	_, file, line, ok = runtime.Caller(calldepth)
+	if !ok {
+		file = "???"
+		line = 0
 	}
-	if logger.flag&timeFlag != 0 {
-		if logger.flag&syslog.Ldate != 0 {
-			year, month, day := t.Date()
-			buf.AppendInt(int64(year))
-			buf.AppendByte('/')
-			buf.AppendInt(int64(month))
-			buf.AppendByte('/')
-			buf.AppendInt(int64(day))
-			buf.AppendByte(' ')
-		}
+	file = filepath.Base(file)
 
-		if logger.flag&(syslog.Ltime|syslog.Lmicroseconds) != 0 {
-			hour, min, sec := t.Clock()
-			buf.AppendInt(int64(hour))
-			buf.AppendByte(':')
-			buf.AppendInt(int64(min))
-			buf.AppendByte(':')
+	buf.AppendString("time=\"")
+	year, month, day := t.Date()
+	buf.AppendInt(int64(year))
+	buf.AppendByte('/')
+	buf.AppendInt(int64(month))
+	buf.AppendByte('/')
+	buf.AppendInt(int64(day))
+	buf.AppendByte(' ')
 
-			buf.AppendInt(int64(sec))
+	hour, min, sec := t.Clock()
+	buf.AppendInt(int64(hour))
+	buf.AppendByte(':')
+	buf.AppendInt(int64(min))
+	buf.AppendByte(':')
+	
+	buf.AppendInt(int64(sec))
+	buf.AppendString("\"")
 
-			if logger.flag&syslog.Lmicroseconds != 0 {
-				buf.AppendByte('.')
-				buf.AppendInt(int64(t.Nanosecond()/1e3))
-			}
-			buf.AppendByte(' ')
-		}
-	}
-	if logger.flag&(syslog.Lshortfile|syslog.Llongfile) != 0 {
-		if logger.flag&syslog.Lshortfile != 0 {
-			short := file
-			for i := len(file) - 1; i > 0; i-- {
-				if file[i] == '/' {
-					short = file[i+1:]
-					break
-				}
-			}
-			file = short
-		}
-		buf.AppendString(file)
-		buf.AppendByte(':')
-		buf.AppendInt(int64(line))
-		buf.AppendString(": ")
-	}
+	logger.sBuff.AppendString(" level=")
+	logger.sBuff.AppendString(getStrLevel(level))
+	logger.sBuff.AppendString(" source=")
 
-	if logger.flag&syslog.Lmsgprefix != 0 {
-		buf.AppendString(logger.filepre)
-	}
+	buf.AppendString(file)
+	buf.AppendByte(':')
+	buf.AppendInt(int64(line))
+	buf.AppendString(" msg=\"")
 }

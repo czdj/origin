@@ -8,10 +8,11 @@ import (
 	"github.com/duanhf2012/origin/network/processor"
 	"github.com/duanhf2012/origin/node"
 	"github.com/duanhf2012/origin/service"
-	"sync/atomic"
-	"sync"
-	"time"
+	"github.com/duanhf2012/origin/util/bytespool"
 	"runtime"
+	"sync"
+	"sync/atomic"
+	"time"
 )
 
 type TcpService struct {
@@ -170,7 +171,7 @@ func (slf *Client) Run() {
 			buf := make([]byte, 4096)
 			l := runtime.Stack(buf, false)
 			errString := fmt.Sprint(r)
-			log.SError("core dump info[",errString,"]\n",string(buf[:l]))
+			log.Dump(string(buf[:l]),log.String("error",errString))
 		}
 	}()
 
@@ -183,7 +184,7 @@ func (slf *Client) Run() {
 		slf.tcpConn.SetReadDeadline(slf.tcpService.tcpServer.ReadDeadline)
 		bytes,err := slf.tcpConn.ReadMsg()
 		if err != nil {
-			log.SDebug("read client id ",slf.id," is error:",err.Error())
+			log.Debug("read client failed",log.ErrorAttr("error",err),log.Uint64("clientId",slf.id))
 			break
 		}
 		data,err:=slf.tcpService.process.Unmarshal(slf.id,bytes)
@@ -277,14 +278,14 @@ func (tcpService *TcpService) GetConnNum() int {
 	return connNum
 }
 
-func (server *TcpService) SetNetMempool(mempool network.INetMempool){
+func (server *TcpService) SetNetMempool(mempool bytespool.IBytesMempool){
 	server.tcpServer.SetNetMempool(mempool)
 }
 
-func (server *TcpService) GetNetMempool() network.INetMempool{
+func (server *TcpService) GetNetMempool() bytespool.IBytesMempool {
 	return server.tcpServer.GetNetMempool()
 }
 
 func (server *TcpService) ReleaseNetMem(byteBuff []byte) {
-	server.tcpServer.GetNetMempool().ReleaseByteSlice(byteBuff)
+	server.tcpServer.GetNetMempool().ReleaseBytes(byteBuff)
 }

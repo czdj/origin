@@ -5,6 +5,8 @@ import (
 	"github.com/duanhf2012/origin/log"
 	"github.com/duanhf2012/origin/rpc"
 	"github.com/duanhf2012/origin/service"
+	"time"
+	"github.com/duanhf2012/origin/util/timer"
 )
 
 const DynamicDiscoveryMasterName = "DiscoveryMaster"
@@ -140,7 +142,7 @@ func (ds *DynamicDiscoveryMaster) RpcCastGo(serviceMethod string, args interface
 func (ds *DynamicDiscoveryMaster) RPC_RegServiceDiscover(req *rpc.ServiceDiscoverReq, res *rpc.Empty) error {
 	if req.NodeInfo == nil {
 		err := errors.New("RPC_RegServiceDiscover req is error.")
-		log.SError(err.Error())
+		log.Error(err.Error())
 
 		return err
 	}
@@ -341,6 +343,10 @@ func (dc *DynamicDiscoveryClient) isDiscoverNode(nodeId int) bool {
 }
 
 func (dc *DynamicDiscoveryClient) OnNodeConnected(nodeId int) {
+	dc.regServiceDiscover(nodeId)
+}
+
+func (dc *DynamicDiscoveryClient) regServiceDiscover(nodeId int){
 	nodeInfo := cluster.GetMasterDiscoveryNodeInfo(nodeId)
 	if nodeInfo == nil {
 		return
@@ -363,12 +369,16 @@ func (dc *DynamicDiscoveryClient) OnNodeConnected(nodeId int) {
 	//向Master服务同步本Node服务信息
 	err := dc.AsyncCallNode(nodeId, RegServiceDiscover, &req, func(res *rpc.Empty, err error) {
 		if err != nil {
-			log.SError("call ", RegServiceDiscover, " is fail :", err.Error())
+			log.Error("call "+RegServiceDiscover+" is fail :"+ err.Error())
+			dc.AfterFunc(time.Second*3, func(timer *timer.Timer) {
+				dc.regServiceDiscover(nodeId)
+			})
+
 			return
 		}
 	})
 	if err != nil {
-		log.SError("call ", RegServiceDiscover, " is fail :", err.Error())
+		log.Error("call "+ RegServiceDiscover+" is fail :"+ err.Error())
 	}
 }
 

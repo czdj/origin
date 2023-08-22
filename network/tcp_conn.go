@@ -41,7 +41,7 @@ func newTCPConn(conn net.Conn, pendingWriteNum int, msgParser *MsgParser,writeDe
 
 			conn.SetWriteDeadline(time.Now().Add(writeDeadline))
 			_, err := conn.Write(b)
-			tcpConn.msgParser.ReleaseByteSlice(b)
+			tcpConn.msgParser.ReleaseBytes(b)
 
 			if err != nil {
 				break
@@ -92,7 +92,7 @@ func (tcpConn *TCPConn) GetRemoteIp() string {
 func (tcpConn *TCPConn) doWrite(b []byte) error{
 	if len(tcpConn.writeChan) == cap(tcpConn.writeChan) {
 		tcpConn.ReleaseReadMsg(b)
-		log.SError("close conn: channel full")
+		log.Error("close conn: channel full")
 		tcpConn.doDestroy()
 		return errors.New("close conn: channel full")
 	}
@@ -130,7 +130,7 @@ func (tcpConn *TCPConn) ReadMsg() ([]byte, error) {
 }
 
 func (tcpConn *TCPConn) ReleaseReadMsg(byteBuff []byte){
-	tcpConn.msgParser.ReleaseByteSlice(byteBuff)
+	tcpConn.msgParser.ReleaseBytes(byteBuff)
 }
 
 func (tcpConn *TCPConn) WriteMsg(args ...[]byte) error {

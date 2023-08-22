@@ -11,7 +11,6 @@ import (
 	"github.com/duanhf2012/origin/util/buildtime"
 	"github.com/duanhf2012/origin/util/timer"
 	"io"
-	slog "log"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
@@ -28,8 +27,8 @@ var preSetupService []service.IService //预安装
 var profilerInterval time.Duration
 var bValid bool
 var configDir = "./config/"
-var logLevel string = "debug"
-var logPath string
+
+
 type BuildOSType = int8
 
 const(
@@ -50,6 +49,8 @@ func init() {
 	console.RegisterCommandString("console", "", "<-console true|false> Turn on or off screen log output.", openConsole)
 	console.RegisterCommandString("loglevel", "debug", "<-loglevel debug|release|warning|error|fatal> Set loglevel.", setLevel)
 	console.RegisterCommandString("logpath", "", "<-logpath path> Set log file path.", setLogPath)
+	console.RegisterCommandInt("logsize", 0, "<-logsize size> Set log size(MB).", setLogSize)
+	console.RegisterCommandInt("logchannelcap", 0, "<-logchannelcap num> Set log channel cap.", setLogChannelCapNum)
 	console.RegisterCommandString("pprof", "", "<-pprof ip:port> Open performance analysis.", setPprof)
 }
 
@@ -144,7 +145,7 @@ func initNode(id int) {
 	nodeId = id
 	err := cluster.GetCluster().Init(GetNodeId(), Setup)
 	if err != nil {
-		log.SFatal("read system config is error ", err.Error())
+		log.Fatal("read system config is error ",log.ErrorAttr("error",err))
 	}
 
 	err = initLog()
@@ -168,7 +169,7 @@ func initNode(id int) {
 		}
 
 		if bSetup == false {
-			log.SFatal("Service name "+serviceName+" configuration error")
+			log.Fatal("Service name "+serviceName+" configuration error")
 		}
 	}
 
@@ -177,13 +178,13 @@ func initNode(id int) {
 }
 
 func initLog() error {
-	if logPath == "" {
+	if log.LogPath == "" {
 		setLogPath("./log")
 	}
 
 	localnodeinfo := cluster.GetCluster().GetLocalNodeInfo()
 	filepre := fmt.Sprintf("%s_%d_", localnodeinfo.NodeName, localnodeinfo.NodeId)
-	logger, err := log.New(logLevel, logPath, filepre, slog.LstdFlags|slog.Lshortfile, 10)
+	logger, err := log.NewTextLogger(log.LogLevel,log.LogPath,filepre,true,log.LogChannelCap)
 	if err != nil {
 		fmt.Printf("cannot create log file!\n")
 		return err
@@ -248,7 +249,7 @@ func startNode(args interface{}) error {
 	}
 
 	timer.StartTimer(10*time.Millisecond, 1000000)
-	log.SRelease("Start running server.")
+	log.Info("Start running server.")
 	//2.初始化node
 	initNode(nodeId)
 
@@ -270,7 +271,7 @@ func startNode(args interface{}) error {
 	for bRun {
 		select {
 		case <-sig:
-			log.SRelease("receipt stop signal.")
+			log.Info("receipt stop signal.")
 			bRun = false
 		case <-pProfilerTicker.C:
 			profiler.Report()
@@ -280,7 +281,8 @@ func startNode(args interface{}) error {
 	//7.退出
 	service.StopAllService()
 
-	log.SRelease("Server is stop.")
+	log.Info("Server is stop.")
+	log.Close()
 	return nil
 }
 
@@ -302,11 +304,6 @@ func SetConfigDir(cfgDir string) {
 
 func GetConfigDir() string {
 	return configDir
-}
-
-func SetSysLog(strLevel string, pathname string, flag int) {
-	logs, _ := log.New(strLevel, pathname, "", flag, 10)
-	log.Export(logs)
 }
 
 func OpenProfilerReport(interval time.Duration) {
@@ -333,9 +330,24 @@ func setLevel(args interface{}) error {
 		return nil
 	}
 
-	logLevel = strings.TrimSpace(args.(string))
-	if logLevel != "debug" && logLevel != "release" && logLevel != "warning" && logLevel != "error" && logLevel != "fatal" {
-		return errors.New("unknown level: " + logLevel)
+	strlogLevel := strings.TrimSpace(args.(string))
+	switch strlogLevel {
+	case "trace":
+		log.LogLevel = log.LevelTrace
+	case "debug":
+		log.LogLevel = log.LevelDebug
+	case "info":
+		log.LogLevel = log.LevelInfo
+	case "warning":
+		log.LogLevel = log.LevelWarning
+	case "error":
+		log.LogLevel = log.LevelError
+	case "stack":
+		log.LogLevel = log.LevelStack
+	case "fatal":
+		log.LogLevel = log.LevelFatal
+	default:
+		return errors.New("unknown level: " + strlogLevel)
 	}
 	return nil
 }
@@ -344,18 +356,48 @@ func setLogPath(args interface{}) error {
 	if args == "" {
 		return nil
 	}
-	logPath = strings.TrimSpace(args.(string))
-	dir, err := os.Stat(logPath) //这个文件夹不存在
+
+	log.LogPath = strings.TrimSpace(args.(string))
+	dir, err := os.Stat(log.LogPath) //这个文件夹不存在
 	if err == nil && dir.IsDir() == false {
-		return errors.New("Not found dir " + logPath)
+		return errors.New("Not found dir " + log.LogPath)
 	}
 
 	if err != nil {
-		err = os.Mkdir(logPath, os.ModePerm)
+		err = os.Mkdir(log.LogPath, os.ModePerm)
 		if err != nil {
-			return errors.New("Cannot create dir " + logPath)
+			return errors.New("Cannot create dir " + log.LogPath)
 		}
 	}
 
+	return nil
+}
+
+func setLogSize(args interface{}) error {
+	if args == "" {
+		return nil
+	}
+
+	logSize,ok := args.(int)
+	if ok == false{
+		return errors.New("param logsize is error")
+	}
+
+	log.LogSize = int64(logSize)*1024*1024
+
+	return nil
+}
+
+func setLogChannelCapNum(args interface{}) error {
+	if args == "" {
+		return nil
+	}
+
+	logChannelCap,ok := args.(int)
+	if ok == false{
+		return errors.New("param logsize is error")
+	}
+
+	log.LogChannelCap = logChannelCap
 	return nil
 }

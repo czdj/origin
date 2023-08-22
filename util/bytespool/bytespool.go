@@ -1,12 +1,12 @@
-package network
+package bytespool
 
 import (
 	"sync"
 )
 
-type INetMempool interface {
-	MakeByteSlice(size int) []byte
-	ReleaseByteSlice(byteBuff []byte) bool
+type IBytesMempool interface {
+	MakeBytes(size int) []byte
+	ReleaseBytes(byteBuff []byte) bool
 }
 
 type memAreaPool struct {
@@ -16,7 +16,7 @@ type memAreaPool struct {
 	pool         []sync.Pool
 }
 
-var memAreaPoolList = [3]*memAreaPool{&memAreaPool{minAreaValue: 1, maxAreaValue: 4096, growthValue: 512}, &memAreaPool{minAreaValue: 4097, maxAreaValue: 40960, growthValue: 4096}, &memAreaPool{minAreaValue: 40961, maxAreaValue: 417792, growthValue: 16384}}
+var memAreaPoolList = [4]*memAreaPool{&memAreaPool{minAreaValue: 1, maxAreaValue: 4096, growthValue: 512}, &memAreaPool{minAreaValue: 4097, maxAreaValue: 40960, growthValue: 4096}, &memAreaPool{minAreaValue: 40961, maxAreaValue: 417792, growthValue: 16384}, &memAreaPool{minAreaValue: 417793, maxAreaValue: 1925120, growthValue: 65536}}
 
 func init() {
 	for i := 0; i < len(memAreaPoolList); i++ {
@@ -68,7 +68,7 @@ func (areaPool *memAreaPool) releaseByteSlice(byteBuff []byte) bool {
 	return true
 }
 
-func (areaPool *memAreaPool) MakeByteSlice(size int) []byte {
+func (areaPool *memAreaPool) MakeBytes(size int) []byte {
 	for i := 0; i < len(memAreaPoolList); i++ {
 		if size <= memAreaPoolList[i].maxAreaValue {
 			return memAreaPoolList[i].makeByteSlice(size)
@@ -78,7 +78,7 @@ func (areaPool *memAreaPool) MakeByteSlice(size int) []byte {
 	return make([]byte, size)
 }
 
-func (areaPool *memAreaPool) ReleaseByteSlice(byteBuff []byte) bool {
+func (areaPool *memAreaPool) ReleaseBytes(byteBuff []byte) bool {
 	for i := 0; i < len(memAreaPoolList); i++ {
 		if cap(byteBuff) <= memAreaPoolList[i].maxAreaValue {
 			return memAreaPoolList[i].releaseByteSlice(byteBuff)
