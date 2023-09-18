@@ -74,7 +74,7 @@ func (slf *MongoModule) UnRef(s *Session) {
 func dialWithTimeout(url string, sessionNum uint32, dialTimeout time.Duration, timeout time.Duration) (*DialContext, error) {
 	if sessionNum <= 0 {
 		sessionNum = 100
-		log.Release("invalid sessionNum, reset to %v", sessionNum)
+		log.Info("invalid sessionNum", log.Int64("reset", int64(sessionNum)))
 	}
 
 	s, err := mgo.DialWithTimeout(url, dialTimeout)

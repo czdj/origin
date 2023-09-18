@@ -168,7 +168,7 @@ func (slf *WSClient) Run() {
 		slf.wsConn.SetReadDeadline(slf.wsService.wsServer.ReadDeadline)
 		bytes,err := slf.wsConn.ReadMsg()
 		if err != nil {
-			log.Debug("read client id %d is error:%+v",slf.id,err)
+			log.Debug("read client error", "clientId", slf.id, "error", err)
 			break
 		}
 		data,err:=slf.wsService.process.Unmarshal(slf.id,bytes)

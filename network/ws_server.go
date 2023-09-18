@@ -2,12 +2,13 @@ package network
 
 import (
 	"crypto/tls"
-	"github.com/duanhf2012/origin/log"
-	"github.com/gorilla/websocket"
 	"net"
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/duanhf2012/origin/log"
+	"github.com/gorilla/websocket"
 )
 
 type WSServer struct {
@@ -118,11 +119,11 @@ func (server *WSServer) Start() {
 	}
 	if server.WriteDeadline <= 0 {
 		server.WriteDeadline = Default_WriteDeadline
-		log.SRelease("invalid WriteDeadline, reset to ", server.WriteDeadline.Seconds(),"s")
+		log.Info("invalid WriteDeadline", log.Int64("reset", int64(server.WriteDeadline.Seconds())))
 	}
 	if server.ReadDeadline <= 0 {
 		server.ReadDeadline = Default_ReadDeadline
-		log.SRelease("invalid ReadDeadline, reset to ", server.ReadDeadline.Seconds(),"s")
+		log.Info("invalid ReadDeadline", log.Int64("reset", int64(server.ReadDeadline.Seconds())))
 	}
 
 	if server.NewAgent == nil {
