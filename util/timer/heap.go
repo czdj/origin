@@ -100,6 +100,14 @@ func tick() bool{
 	return true
 }
 
+func GetTimeOffset() time.Duration {
+	return timeOffset
+}
+
+func SetTimeOffset(offset time.Duration)  {
+	timeOffset = offset
+}
+
 func Now() time.Time{
 	if timeOffset == 0 {
 		return time.Now()
