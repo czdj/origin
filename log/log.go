@@ -73,7 +73,7 @@ func (iw *IoWriter) Close() error {
 func (iw *IoWriter) close() error {
 	if iw.closeSig != nil {
 		close(iw.closeSig)
-		iw.closeSig = nil
+		//iw.closeSig = nil
 	}
 	iw.wg.Wait()
 
