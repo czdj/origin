@@ -161,7 +161,7 @@ func (s *Service) Start() {
 func (s *Service) Run() {
 	defer s.wg.Done()
 	var bStop = false
-	
+
 	concurrent := s.IConcurrent.(*concurrent.Concurrent)
 	concurrentCBChannel := concurrent.GetCallBackChannel()
 
@@ -246,7 +246,7 @@ func (s *Service) Run() {
 		if bStop == true {
 			if atomic.AddInt32(&s.goroutineNum,-1)<=0 {
 				s.startStatus = false
-				//s.Release()
+				s.Release()
 			}
 			break
 		}
@@ -349,7 +349,7 @@ func (s *Service) Release(){
 			log.Dump(string(buf[:l]),log.String("error",errString))
 		}
 	}()
-	
+
 	s.self.OnRelease()
 }
 
@@ -364,8 +364,6 @@ func (s *Service) Stop(){
 	log.Info("stop "+s.GetName()+" service ")
 	close(s.closeSig)
 	s.wg.Wait()
-	s.ServiceExit()
-	s.Release()
 	log.Info(s.GetName()+" service has been stopped")
 }
 
@@ -439,7 +437,6 @@ func (s *Service) UnRegDiscoverListener(rpcLister rpc.INodeListener) {
 func (s *Service) PushRpcRequest(rpcRequest *rpc.RpcRequest) error{
 	if s.bStop {
 		err := errors.New(fmt.Sprintf("push rpc request service %s is stop", s.name))
-		log.Error(err.Error())
 		return err
 	}
 
@@ -461,7 +458,6 @@ func (s *Service) PushRpcResponse(call *rpc.Call) error{
 func (s *Service) PushEvent(ev event.IEvent) error{
 	if s.bStop {
 		err := errors.New(fmt.Sprintf("push event service %s is stop", s.name))
-		log.Error(err.Error())
 		return err
 	}
 
