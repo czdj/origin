@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
+
 	"github.com/duanhf2012/origin/concurrent"
 )
 
@@ -62,6 +64,7 @@ type Service struct {
 	discoveryServiceLister rpc.IDiscoveryServiceListener
 	chanEvent chan event.IEvent
 	closeSig chan struct{}
+	bStop bool
 }
 
 // RpcConnEvent Node结点连接事件
@@ -168,6 +171,7 @@ func (s *Service) Run() {
 		select {
 		case <- s.closeSig:
 			bStop = true
+			s.bStop = true
 			concurrent.Close()
 		case cb:=<-concurrentCBChannel:
 			concurrent.DoCallback(cb)
@@ -242,9 +246,88 @@ func (s *Service) Run() {
 		if bStop == true {
 			if atomic.AddInt32(&s.goroutineNum,-1)<=0 {
 				s.startStatus = false
-				s.Release()
+				//s.Release()
 			}
 			break
+		}
+	}
+}
+
+func (s *Service) ServiceExit() {
+	concurrent := s.IConcurrent.(*concurrent.Concurrent)
+	concurrentCBChannel := concurrent.GetCallBackChannel()
+
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	if len(s.chanEvent) > 0 || len(concurrentCBChannel) > 0 {
+		log.Info("service exit have left event", "service", s.name, "eventNum", len(s.chanEvent), "concurrentCBChannelNum", len(concurrentCBChannel))
+	}
+
+	for len(s.chanEvent) > 0 || len(concurrentCBChannel) > 0 {
+		var analyzer *profiler.Analyzer
+		select {
+		case cb:=<-concurrentCBChannel:
+			concurrent.DoCallback(cb)
+		case ev := <- s.chanEvent:
+			switch ev.GetEventType() {
+			case event.Sys_Event_Retire:
+				log.Info("service OnRetire",log.String("servceName",s.GetName()))
+				s.self.(IService).OnRetire()
+			case event.ServiceRpcRequestEvent:
+				cEvent,ok := ev.(*event.Event)
+				if ok == false {
+					log.Error("Type event conversion error")
+					break
+				}
+				rpcRequest,ok := cEvent.Data.(*rpc.RpcRequest)
+				if ok == false {
+					log.Error("Type *rpc.RpcRequest conversion error")
+					break
+				}
+				if s.profiler!=nil {
+					analyzer = s.profiler.Push("[Req]"+rpcRequest.RpcRequestData.GetServiceMethod())
+				}
+
+				s.GetRpcHandler().HandlerRpcRequest(rpcRequest)
+				if analyzer!=nil {
+					analyzer.Pop()
+					analyzer = nil
+				}
+				event.DeleteEvent(cEvent)
+			case event.ServiceRpcResponseEvent:
+				cEvent,ok := ev.(*event.Event)
+				if ok == false {
+					log.Error("Type event conversion error")
+					break
+				}
+				rpcResponseCB,ok := cEvent.Data.(*rpc.Call)
+				if ok == false {
+					log.Error("Type *rpc.Call conversion error")
+					break
+				}
+				if s.profiler!=nil {
+					analyzer = s.profiler.Push("[Res]" + rpcResponseCB.ServiceMethod)
+				}
+				s.GetRpcHandler().HandlerRpcResponseCB(rpcResponseCB)
+				if analyzer!=nil {
+					analyzer.Pop()
+					analyzer = nil
+				}
+				event.DeleteEvent(cEvent)
+			default:
+				if s.profiler!=nil {
+					analyzer = s.profiler.Push("[SEvent]"+strconv.Itoa(int(ev.GetEventType())))
+				}
+				s.eventProcessor.EventHandler(ev)
+				if analyzer!=nil {
+					analyzer.Pop()
+					analyzer = nil
+				}
+			}
+		case <-ticker.C: //30s后强制退出
+			log.Error("service force exit", "service", s.name, "eventNum", len(s.chanEvent), "concurrentCBChannelNum", len(concurrentCBChannel))
+			return
 		}
 	}
 }
@@ -281,6 +364,8 @@ func (s *Service) Stop(){
 	log.Info("stop "+s.GetName()+" service ")
 	close(s.closeSig)
 	s.wg.Wait()
+	s.ServiceExit()
+	s.Release()
 	log.Info(s.GetName()+" service has been stopped")
 }
 
@@ -352,6 +437,12 @@ func (s *Service) UnRegDiscoverListener(rpcLister rpc.INodeListener) {
 }
 
 func (s *Service) PushRpcRequest(rpcRequest *rpc.RpcRequest) error{
+	if s.bStop {
+		err := errors.New(fmt.Sprintf("push rpc request service %s is stop", s.name))
+		log.Error(err.Error())
+		return err
+	}
+
 	ev := event.NewEvent()
 	ev.Type = event.ServiceRpcRequestEvent
 	ev.Data = rpcRequest
@@ -368,12 +459,18 @@ func (s *Service) PushRpcResponse(call *rpc.Call) error{
 }
 
 func (s *Service) PushEvent(ev event.IEvent) error{
+	if s.bStop {
+		err := errors.New(fmt.Sprintf("push event service %s is stop", s.name))
+		log.Error(err.Error())
+		return err
+	}
+
 	return s.pushEvent(ev)
 }
 
 func (s *Service) pushEvent(ev event.IEvent) error{
 	if len(s.chanEvent) >= maxServiceEventChannelNum {
-		err := errors.New("The event channel in the service is full")
+		err := errors.New(fmt.Sprintf("The event channel in the service %s is full", s.name))
 		log.Error(err.Error())
 		return err
 	}
